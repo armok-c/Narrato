@@ -32,49 +32,6 @@ def parse_timestamp(timestamp: str) -> tuple:
     return start_time, end_time
 
 
-def verify_clip_duration(output_path: str, expected_duration: float, tolerance: float = 0.3) -> bool:
-    """
-    验证裁剪后的视频时长是否符合预期
-    
-    Args:
-        output_path: 输出视频路径
-        expected_duration: 期望的时长（秒）
-        tolerance: 允许的误差范围（秒），默认0.3秒
-    
-    Returns:
-        bool: 是否在误差范围内
-    """
-    try:
-        cmd = [
-            'ffprobe', '-v', 'error',
-            '-show_entries', 'format=duration',
-            '-of', 'csv=p=0',
-            output_path
-        ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        actual_duration = float(result.stdout.strip())
-        
-        diff = abs(actual_duration - expected_duration)
-        is_valid = diff <= tolerance
-        
-        if not is_valid:
-            logger.warning(
-                f"片段时长验证失败: 期望={expected_duration:.3f}秒, "
-                f"实际={actual_duration:.3f}秒, 差异={diff:.3f}秒, "
-                f"容差={tolerance}秒"
-            )
-        else:
-            logger.debug(
-                f"片段时长验证通过: 期望={expected_duration:.3f}秒, "
-                f"实际={actual_duration:.3f}秒, 差异={diff:.3f}秒"
-            )
-        
-        return is_valid
-    except Exception as e:
-        logger.error(f"验证片段时长时出错: {str(e)}")
-        return False
-
-
 def calculate_end_time(start_time: str, duration: float, extra_seconds: float = 1.0) -> str:
     """
     根据开始时间和持续时间计算结束时间
@@ -113,8 +70,7 @@ def calculate_end_time(start_time: str, duration: float, extra_seconds: float = 
     if has_milliseconds:
         return f"{h_new:02d}:{m_new:02d}:{s_new:02d},{ms_new:03d}"
     else:
-        # 即使输入没有毫秒，也添加毫秒部分以提高精度
-        return f"{h_new:02d}:{m_new:02d}:{s_new:02d},000"
+        return f"{h_new:02d}:{m_new:02d}:{s_new:02d}"
 
 
 def check_hardware_acceleration() -> Optional[str]:
@@ -126,6 +82,7 @@ def check_hardware_acceleration() -> Optional[str]:
     """
     # 使用集中式硬件加速检测
     return ffmpeg_utils.get_ffmpeg_hwaccel_type()
+
 
 def get_safe_encoder_config(hwaccel_type: Optional[str] = None) -> Dict[str, str]:
     """
@@ -211,10 +168,10 @@ def build_ffmpeg_command(
     cmd = ["ffmpeg", "-y"]
     
     # 关键修正：对于视频裁剪，不使用CUDA硬件解码，只使用NVENC编码器
-    # 这样能避免 "Impossible to convert between formats" 错误
+    # 这样能避免滤镜链格式转换错误，同时保持编码性能优势
     if encoder_config["video_codec"] == "h264_nvenc":
         # 不添加硬件解码参数，让FFmpeg自动处理
-        # 这避免了 "Impossible to convert between formats" 错误
+        # 这避免了 "Impossible to convert between the formats" 错误
         pass
     elif hwaccel_args:
         # 对于其他编码器，可以使用硬件解码参数
@@ -425,6 +382,7 @@ def try_compatibility_fallback(
     
     return execute_simple_command(fallback_cmd, timestamp, "兼容性模式")
 
+
 def try_software_fallback(
     input_path: str,
     output_path: str,
@@ -464,6 +422,7 @@ def try_software_fallback(
     
     return execute_simple_command(fallback_cmd, timestamp, "软件编码")
 
+
 def try_basic_fallback(
     input_path: str,
     output_path: str,
@@ -500,6 +459,7 @@ def try_basic_fallback(
     ]
     
     return execute_simple_command(fallback_cmd, timestamp, "基本编码")
+
 
 def execute_simple_command(cmd: List[str], timestamp: str, method_name: str) -> bool:
     """
@@ -545,6 +505,7 @@ def execute_simple_command(cmd: List[str], timestamp: str, method_name: str) -> 
         logger.error(f"{method_name}异常: {str(e)}")
         return False
 
+
 def try_fallback_encoding(
     input_path: str,
     output_path: str,
@@ -583,6 +544,7 @@ def try_fallback_encoding(
     
     return execute_simple_command(fallback_cmd, timestamp, "通用Fallback")
 
+
 def _process_narration_only_segment(
     video_origin_path: str,
     script_item: Dict,
@@ -608,20 +570,12 @@ def _process_narration_only_segment(
     # 解析起始时间，使用TTS音频时长计算结束时间
     start_time, _ = parse_timestamp(timestamp)
     duration = tts_item["duration"]
-    
-    # 关键修复：为OST=0添加0.5秒余量，避免视频时长不足导致黑屏
-    extra_seconds_for_narration = 0.5  # 0.5秒余量，避免视频时长不足
-    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=extra_seconds_for_narration)
-    
-    logger.info(
-        f"OST=0片段 {_id}: TTS时长={duration:.3f}秒, "
-        f"时间范围={start_time} -> {calculated_end_time}"
-    )
+    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=0)
 
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = calculated_end_time.replace(',', '.')
-    
+
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = calculated_end_time.replace(':', '-').replace(',', '-')
@@ -639,13 +593,6 @@ def _process_narration_only_segment(
         cmd, timestamp, video_origin_path, output_path,
         ffmpeg_start_time, ffmpeg_end_time
     )
-    
-    # 验证裁剪后的时长
-    if success and os.path.exists(output_path):
-        is_duration_valid = verify_clip_duration(output_path, duration)
-        if not is_duration_valid:
-            logger.warning(f"片段 {_id} 时长验证失败，可能导致黑屏或循环播放")
-            success = False
 
     return output_path if success else None
 
@@ -671,7 +618,7 @@ def _process_original_audio_segment(
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = end_time.replace(',', '.')
-    
+
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = end_time.replace(':', '-').replace(',', '-')
@@ -718,20 +665,12 @@ def _process_mixed_segment(
     # 解析起始时间，使用TTS音频时长计算结束时间
     start_time, _ = parse_timestamp(timestamp)
     duration = tts_item["duration"]
-    
-    # 关键修复：为OST=2添加0.5秒余量，避免视频时长不足导致黑屏
-    extra_seconds_for_mixed = 0.5  # 0.5秒余量，避免视频时长不足
-    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=extra_seconds_for_mixed)
-    
-    logger.info(
-        f"OST=2片段 {_id}: TTS时长={duration:.3f}秒, "
-        f"时间范围={start_time} -> {calculated_end_time}"
-    )
+    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=0)
 
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = calculated_end_time.replace(',', '.')
-    
+
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = calculated_end_time.replace(':', '-').replace(',', '-')
@@ -749,13 +688,6 @@ def _process_mixed_segment(
         cmd, timestamp, video_origin_path, output_path,
         ffmpeg_start_time, ffmpeg_end_time
     )
-    
-    # 验证裁剪后的时长
-    if success and os.path.exists(output_path):
-        is_duration_valid = verify_clip_duration(output_path, duration)
-        if not is_duration_valid:
-            logger.warning(f"片段 {_id} 时长验证失败，可能导致黑屏或循环播放")
-            success = False
 
     return output_path if success else None
 
@@ -780,52 +712,28 @@ def _build_ffmpeg_command_with_audio_control(
         encoder_config: 编码器配置
         hwaccel_args: 硬件加速参数
         remove_audio: 是否移除音频（OST=0时为True）
-        
+
     Returns:
         List[str]: ffmpeg命令列表
     """
     cmd = ["ffmpeg", "-y"]
-    
+
     # 硬件加速设置（参考原有逻辑）
     if encoder_config["video_codec"] == "h264_nvenc":
         # 对于NVENC，不使用硬件解码以避免滤镜链问题
         pass
     elif hwaccel_args:
         cmd.extend(hwaccel_args)
-    
+
     # 输入文件
     cmd.extend(["-i", input_path])
-    
-    # 关键修复：优先使用 -t 参数（duration）而非 -to，提高裁剪精度
-    # 计算实际裁剪时长
-    start_time_has_ms = ',' in start_time
-    end_time_has_ms = ',' in end_time
-    
-    # 解析开始和结束时间到毫秒
-    if start_time_has_ms:
-        start_h, start_m, start_s, start_ms = map(int, start_time.replace('.', ',').replace(':', ',').split(','))
-        start_total_ms = start_h * 3600000 + start_m * 60000 + start_s * 1000 + start_ms
-    else:
-        start_h, start_m, start_s = map(int, start_time.replace('.', ',').split(':'))
-        start_total_ms = start_h * 3600000 + start_m * 60000 + start_s * 1000
-    
-    if end_time_has_ms:
-        end_h, end_m, end_s, end_ms = map(int, end_time.replace('.', ',').replace(':', ',').split(','))
-        end_total_ms = end_h * 3600000 + end_m * 60000 + end_s * 1000 + end_ms
-    else:
-        end_h, end_m, end_s = map(int, end_time.replace('.', ',').split(':'))
-        end_total_ms = end_h * 3600000 + end_m * 60000 + end_s * 1000
-    
-    # 计算裁剪时长（秒）
-    duration_seconds = (end_total_ms - start_total_ms) / 1000.0
-    
-    cmd.extend(["-ss", start_time, "-t", str(duration_seconds)])
-    
-    logger.debug(f"使用 -t 参数裁剪: 起始={start_time}, 时长={duration_seconds:.3f}秒")
-    
+
+    # 时间范围
+    cmd.extend(["-ss", start_time, "-to", end_time])
+
     # 视频编码器设置
     cmd.extend(["-c:v", encoder_config["video_codec"]])
-    
+
     # 音频处理
     if remove_audio:
         # OST=0: 移除音频
@@ -836,10 +744,10 @@ def _build_ffmpeg_command_with_audio_control(
         cmd.extend(["-c:a", encoder_config["audio_codec"]])
         cmd.extend(["-ar", "44100", "-ac", "2"])
         logger.debug("OST=1/2: 保持原声")
-    
+
     # 像素格式
     cmd.extend(["-pix_fmt", encoder_config["pixel_format"]])
-    
+
     # 质量和预设参数（参考原有逻辑）
     if encoder_config["video_codec"] == "h264_nvenc":
         cmd.extend(["-preset", encoder_config["preset"]])
@@ -858,11 +766,11 @@ def _build_ffmpeg_command_with_audio_control(
         # 软件编码器（libx264）
         cmd.extend(["-preset", encoder_config["preset"]])
         cmd.extend(["-crf", encoder_config["quality_value"]])
-    
+
     # 优化参数
     cmd.extend(["-avoid_negative_ts", "make_zero"])
     cmd.extend(["-movflags", "+faststart"])
-    
+
     # 输出文件
     cmd.append(output_path)
 
@@ -1030,7 +938,7 @@ def clip_video(
     # 获取硬件加速支持
     hwaccel_type = check_hardware_acceleration()
     hwaccel_args = []
-
+    
     if hwaccel_type:
         hwaccel_args = ffmpeg_utils.get_ffmpeg_hwaccel_args()
         hwaccel_info = ffmpeg_utils.get_ffmpeg_hwaccel_info()
@@ -1124,7 +1032,7 @@ def clip_video(
 
         # 执行FFmpeg命令
         logger.info(f"📹 [{i}/{total_clips}] 裁剪视频片段: {timestamp} -> {ffmpeg_start_time}到{ffmpeg_end_time}")
-
+        
         success = execute_ffmpeg_with_fallback(
             ffmpeg_cmd, 
             timestamp,
@@ -1133,7 +1041,7 @@ def clip_video(
             ffmpeg_start_time,
             ffmpeg_end_time
         )
-
+        
         if success:
             result[_id] = output_path
             success_count += 1
