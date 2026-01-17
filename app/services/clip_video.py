@@ -422,7 +422,6 @@ def try_software_fallback(
     
     return execute_simple_command(fallback_cmd, timestamp, "软件编码")
 
-
 def try_basic_fallback(
     input_path: str,
     output_path: str,
@@ -459,7 +458,6 @@ def try_basic_fallback(
     ]
     
     return execute_simple_command(fallback_cmd, timestamp, "基本编码")
-
 
 def execute_simple_command(cmd: List[str], timestamp: str, method_name: str) -> bool:
     """
@@ -505,7 +503,6 @@ def execute_simple_command(cmd: List[str], timestamp: str, method_name: str) -> 
         logger.error(f"{method_name}异常: {str(e)}")
         return False
 
-
 def try_fallback_encoding(
     input_path: str,
     output_path: str,
@@ -544,7 +541,6 @@ def try_fallback_encoding(
     
     return execute_simple_command(fallback_cmd, timestamp, "通用Fallback")
 
-
 def _process_narration_only_segment(
     video_origin_path: str,
     script_item: Dict,
@@ -575,7 +571,7 @@ def _process_narration_only_segment(
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = calculated_end_time.replace(',', '.')
-
+    
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = calculated_end_time.replace(':', '-').replace(',', '-')
@@ -618,7 +614,7 @@ def _process_original_audio_segment(
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = end_time.replace(',', '.')
-
+    
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = end_time.replace(':', '-').replace(',', '-')
@@ -670,7 +666,7 @@ def _process_mixed_segment(
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
     ffmpeg_end_time = calculated_end_time.replace(',', '.')
-
+    
     # 生成输出文件名
     safe_start_time = start_time.replace(':', '-').replace(',', '-')
     safe_end_time = calculated_end_time.replace(':', '-').replace(',', '-')
@@ -712,19 +708,19 @@ def _build_ffmpeg_command_with_audio_control(
         encoder_config: 编码器配置
         hwaccel_args: 硬件加速参数
         remove_audio: 是否移除音频（OST=0时为True）
-
+        
     Returns:
         List[str]: ffmpeg命令列表
     """
     cmd = ["ffmpeg", "-y"]
-
+    
     # 硬件加速设置（参考原有逻辑）
     if encoder_config["video_codec"] == "h264_nvenc":
         # 对于NVENC，不使用硬件解码以避免滤镜链问题
         pass
     elif hwaccel_args:
         cmd.extend(hwaccel_args)
-
+    
     # 输入文件
     cmd.extend(["-i", input_path])
 
@@ -733,7 +729,7 @@ def _build_ffmpeg_command_with_audio_control(
 
     # 视频编码器设置
     cmd.extend(["-c:v", encoder_config["video_codec"]])
-
+    
     # 音频处理
     if remove_audio:
         # OST=0: 移除音频
@@ -744,10 +740,10 @@ def _build_ffmpeg_command_with_audio_control(
         cmd.extend(["-c:a", encoder_config["audio_codec"]])
         cmd.extend(["-ar", "44100", "-ac", "2"])
         logger.debug("OST=1/2: 保持原声")
-
+    
     # 像素格式
     cmd.extend(["-pix_fmt", encoder_config["pixel_format"]])
-
+    
     # 质量和预设参数（参考原有逻辑）
     if encoder_config["video_codec"] == "h264_nvenc":
         cmd.extend(["-preset", encoder_config["preset"]])
@@ -766,11 +762,11 @@ def _build_ffmpeg_command_with_audio_control(
         # 软件编码器（libx264）
         cmd.extend(["-preset", encoder_config["preset"]])
         cmd.extend(["-crf", encoder_config["quality_value"]])
-
+    
     # 优化参数
     cmd.extend(["-avoid_negative_ts", "make_zero"])
     cmd.extend(["-movflags", "+faststart"])
-
+    
     # 输出文件
     cmd.append(output_path)
 
@@ -938,7 +934,7 @@ def clip_video(
     # 获取硬件加速支持
     hwaccel_type = check_hardware_acceleration()
     hwaccel_args = []
-    
+
     if hwaccel_type:
         hwaccel_args = ffmpeg_utils.get_ffmpeg_hwaccel_args()
         hwaccel_info = ffmpeg_utils.get_ffmpeg_hwaccel_info()
@@ -1032,7 +1028,7 @@ def clip_video(
 
         # 执行FFmpeg命令
         logger.info(f"📹 [{i}/{total_clips}] 裁剪视频片段: {timestamp} -> {ffmpeg_start_time}到{ffmpeg_end_time}")
-        
+
         success = execute_ffmpeg_with_fallback(
             ffmpeg_cmd, 
             timestamp,
@@ -1041,7 +1037,7 @@ def clip_video(
             ffmpeg_start_time,
             ffmpeg_end_time
         )
-        
+
         if success:
             result[_id] = output_path
             success_count += 1
