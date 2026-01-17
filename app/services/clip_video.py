@@ -73,6 +73,98 @@ def calculate_end_time(start_time: str, duration: float, extra_seconds: float = 
         return f"{h_new:02d}:{m_new:02d}:{s_new:02d}"
 
 
+def time_to_seconds(time_str: str) -> float:
+    """
+    将时间字符串转换为秒数
+
+    Args:
+        time_str: 时间字符串，格式为'HH:MM:SS'或'HH:MM:SS,sss'
+
+    Returns:
+        float: 秒数
+    """
+    # 替换逗号为点号（兼容毫秒格式）
+    time_str = time_str.replace(',', '.')
+
+    # 解析时分秒
+    parts = time_str.split(':')
+    h = int(parts[0])
+    m = int(parts[1])
+    s = float(parts[2])
+
+    return h * 3600 + m * 60 + s
+
+
+def get_video_duration(video_path: str) -> float:
+    """
+    获取视频文件的总时长（秒）
+
+    Args:
+        video_path: 视频文件路径
+
+    Returns:
+        float: 视频时长（秒），失败返回 0
+    """
+    try:
+        # 使用 ffprobe 获取视频时长
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            video_path
+        ]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            duration = float(result.stdout.strip())
+            if duration > 0:
+                logger.info(f"视频总时长: {duration:.3f}秒")
+                return duration
+            else:
+                logger.warning(f"获取到无效的视频时长: {duration}")
+
+    except FileNotFoundError:
+        logger.warning("ffprobe 未安装，无法获取视频时长")
+    except subprocess.TimeoutExpired:
+        logger.warning("ffprobe 执行超时")
+    except ValueError:
+        logger.warning(f"无法解析 ffprobe 输出: {result.stdout}")
+    except Exception as e:
+        logger.error(f"获取视频时长失败: {str(e)}")
+
+    return 0.0
+
+
+def seconds_to_time(seconds: float, with_milliseconds: bool = False) -> str:
+    """
+    将秒数转换为时间字符串
+
+    Args:
+        seconds: 秒数
+        with_milliseconds: 是否包含毫秒
+
+    Returns:
+        str: 时间字符串，格式为'HH:MM:SS'或'HH:MM:SS,sss'
+    """
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = seconds % 60
+
+    if with_milliseconds:
+        ms = int((secs - int(secs)) * 1000)
+        return f"{hours:02d}:{minutes:02d}:{int(secs):02d},{ms:03d}"
+    else:
+        return f"{hours:02d}:{minutes:02d}:{int(secs):02d}"
+
+
 def check_hardware_acceleration() -> Optional[str]:
     """
     检查系统支持的硬件加速选项
@@ -551,7 +643,7 @@ def _process_narration_only_segment(
 ) -> Optional[str]:
     """
     处理OST=0的纯解说片段
-    - 根据TTS音频时长动态裁剪
+    - 智能匹配解说文案时长和TTS音频时长
     - 移除原声，生成静音视频
     """
     _id = script_item["_id"]
@@ -563,10 +655,35 @@ def _process_narration_only_segment(
         logger.error(f"未找到片段 {_id} 的TTS结果")
         return None
 
-    # 解析起始时间，使用TTS音频时长计算结束时间
-    start_time, _ = parse_timestamp(timestamp)
-    duration = tts_item["duration"]
-    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=0)
+    # 解析时间戳
+    start_time, original_end_time = parse_timestamp(timestamp)
+
+    # 计算解说文案预设时长
+    script_duration = time_to_seconds(original_end_time) - time_to_seconds(start_time)
+
+    # 获取TTS音频时长
+    tts_duration = tts_item["duration"]
+
+    # 智能时长匹配策略
+    duration_diff = abs(tts_duration - script_duration)
+    use_tts_duration = True  # 默认使用 TTS 时长
+    final_duration = tts_duration
+
+    if duration_diff > 2.0:  # 差异超过2秒
+        logger.warning(
+            f"⚠️  片段 {_id} 时长差异较大: "
+            f"TTS={tts_duration:.2f}s vs 文案={script_duration:.2f}s (差{duration_diff:.2f}s)"
+        )
+        # 差异较大，仍然使用TTS时长（因为音频已生成），但记录警告
+        logger.info(f"   → 仍使用TTS时长 {tts_duration:.2f}s 进行裁剪")
+    elif duration_diff > 0.5:  # 差异0.5-2秒
+        logger.info(
+            f"ℹ️  片段 {_id} 时长差异: "
+            f"TTS={tts_duration:.2f}s vs 文案={script_duration:.2f}s (差{duration_diff:.2f}s)"
+        )
+    # 差异在合理范围内（≤0.5秒），静默使用TTS时长
+
+    calculated_end_time = calculate_end_time(start_time, final_duration, extra_seconds=0)
 
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
@@ -598,18 +715,46 @@ def _process_original_audio_segment(
     script_item: Dict,
     output_dir: str,
     encoder_config: Dict,
-    hwaccel_args: List[str]
+    hwaccel_args: List[str],
+    video_duration: float = 0.0
 ) -> Optional[str]:
     """
     处理OST=1的纯原声片段
+    - 验证时间戳可信度
+    - 边界检查（防止超出视频总时长）
     - 严格按照脚本timestamp精确裁剪
     - 保持原声不变
     """
     _id = script_item["_id"]
     timestamp = script_item["timestamp"]
 
-    # 严格按照timestamp进行裁剪
+    # 解析时间戳
     start_time, end_time = parse_timestamp(timestamp)
+
+    # 验证时间戳合理性
+    start_seconds = time_to_seconds(start_time)
+    end_seconds = time_to_seconds(end_time)
+
+    if start_seconds >= end_seconds:
+        logger.error(
+            f"❌ 片段 {_id} (OST=1) 时间戳无效: "
+            f"开始时间 {start_time} >= 结束时间 {end_time}"
+        )
+        return None
+
+    duration = end_seconds - start_seconds
+    logger.debug(f"片段 {_id} (OST=1) 时长: {duration:.3f}秒")
+
+    # 边界检查：确保不超出视频总时长
+    if video_duration > 0 and end_seconds > video_duration:
+        logger.warning(
+            f"⚠️  片段 {_id} (OST=1) 超出视频边界: "
+            f"结束时间 {end_time} ({end_seconds:.3f}s) > 视频总时长 {video_duration:.3f}s"
+        )
+        # 调整结束时间为视频总时长减去余量
+        adjusted_end_time = seconds_to_time(video_duration - 0.1, with_milliseconds=(',' in start_time))
+        logger.warning(f"   → 自动调整为: {adjusted_end_time} (保留0.1秒余量)")
+        end_time = adjusted_end_time
 
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
@@ -646,7 +791,7 @@ def _process_mixed_segment(
 ) -> Optional[str]:
     """
     处理OST=2的解说+原声混合片段
-    - 根据TTS音频时长动态裁剪
+    - 智能匹配解说文案时长和TTS音频时长
     - 保持原声，确保视频时长等于TTS音频时长
     """
     _id = script_item["_id"]
@@ -658,10 +803,34 @@ def _process_mixed_segment(
         logger.error(f"未找到片段 {_id} 的TTS结果")
         return None
 
-    # 解析起始时间，使用TTS音频时长计算结束时间
-    start_time, _ = parse_timestamp(timestamp)
-    duration = tts_item["duration"]
-    calculated_end_time = calculate_end_time(start_time, duration, extra_seconds=0)
+    # 解析时间戳
+    start_time, original_end_time = parse_timestamp(timestamp)
+
+    # 计算解说文案预设时长
+    script_duration = time_to_seconds(original_end_time) - time_to_seconds(start_time)
+
+    # 获取TTS音频时长
+    tts_duration = tts_item["duration"]
+
+    # 智能时长匹配策略
+    duration_diff = abs(tts_duration - script_duration)
+    use_tts_duration = True  # 默认使用 TTS 时长
+    final_duration = tts_duration
+
+    if duration_diff > 2.0:  # 差异超过2秒
+        logger.warning(
+            f"⚠️  片段 {_id} (OST=2) 时长差异较大: "
+            f"TTS={tts_duration:.2f}s vs 文案={script_duration:.2f}s (差{duration_diff:.2f}s)"
+        )
+        # 差异较大，仍然使用TTS时长（因为音频已生成），但记录警告
+        logger.info(f"   → 仍使用TTS时长 {tts_duration:.2f}s 进行裁剪")
+    elif duration_diff > 0.5:  # 差异0.5-2秒
+        logger.info(
+            f"ℹ️  片段 {_id} (OST=2) 时长差异: "
+            f"TTS={tts_duration:.2f}s vs 文案={script_duration:.2f}s (差{duration_diff:.2f}s)"
+        )
+
+    calculated_end_time = calculate_end_time(start_time, final_duration, extra_seconds=0)
 
     # 转换为FFmpeg兼容的时间格式
     ffmpeg_start_time = start_time.replace(',', '.')
@@ -946,6 +1115,13 @@ def clip_video(
     encoder_config = get_safe_encoder_config(hwaccel_type)
     logger.debug(f"编码器配置: {encoder_config}")
 
+    # 获取视频总时长（用于边界检查）
+    video_duration = get_video_duration(video_origin_path)
+    if video_duration <= 0:
+        logger.warning("⚠️  无法获取视频总时长，跳过边界检查")
+    else:
+        logger.info(f"📺 视频总时长: {seconds_to_time(video_duration, with_milliseconds=True)} ({video_duration:.3f}秒)")
+
     # 统计信息
     total_clips = len(tts_result)
     result = {}
@@ -954,10 +1130,42 @@ def clip_video(
 
     logger.info(f"📹 开始裁剪视频，总共{total_clips}个片段")
 
+    # 片段连续性检查
+    previous_end_time = None
+    continuity_errors = []
+
     for i, item in enumerate(tts_result, 1):
         _id = item.get("_id", item.get("timestamp", "unknown"))
         timestamp = item["timestamp"]
         start_time, _ = parse_timestamp(timestamp)
+
+        # 连续性检查
+        if previous_end_time is not None:
+            current_start_seconds = time_to_seconds(start_time)
+            gap = current_start_seconds - previous_end_time
+            if gap > 0.5:  # 时间间隔超过0.5秒
+                continuity_errors.append({
+                    "index": i - 1,
+                    "current_id": _id,
+                    "gap": gap,
+                    "previous_end": seconds_to_time(previous_end_time),
+                    "current_start": start_time
+                })
+                logger.warning(
+                    f"⚠️  检测到时间间隙: 片段{i-1}和{i}之间有{gap:.3f}秒的间隔"
+                )
+
+        # 记录当前片段的结束时间（预估）
+        duration = item.get("duration", 5.0)
+        if duration <= 0 or duration > 300:
+            # 尝试从时间戳计算
+            try:
+                _, end_time_str = timestamp.split('-')
+                previous_end_time = time_to_seconds(end_time_str)
+            except:
+                previous_end_time = time_to_seconds(start_time) + 5.0
+        else:
+            previous_end_time = time_to_seconds(start_time) + duration
 
         # 根据持续时间计算真正的结束时间（加上1秒余量）
         duration = item["duration"]
@@ -1006,6 +1214,19 @@ def clip_video(
 
         calculated_end_time = calculate_end_time(start_time, duration)
 
+        # 边界检查：确保结束时间不超过视频总时长
+        if video_duration > 0:
+            calculated_end_seconds = time_to_seconds(calculated_end_time)
+            if calculated_end_seconds > video_duration:
+                # 超出边界，需要调整
+                original_end_time = calculated_end_time
+                calculated_end_time = seconds_to_time(video_duration - 0.1, with_milliseconds=(',' in start_time))
+                logger.warning(
+                    f"⚠️  片段 {_id} 超出视频边界: "
+                    f"计算结束时间 {original_end_time} > 视频总时长 {seconds_to_time(video_duration, with_milliseconds=True)}"
+                )
+                logger.warning(f"   → 自动调整为: {calculated_end_time} (保留0.1秒余量)")
+
         # 转换为FFmpeg兼容的时间格式（逗号替换为点）
         ffmpeg_start_time = start_time.replace(',', '.')
         ffmpeg_end_time = calculated_end_time.replace(',', '.')
@@ -1027,7 +1248,11 @@ def clip_video(
         )
 
         # 执行FFmpeg命令
-        logger.info(f"📹 [{i}/{total_clips}] 裁剪视频片段: {timestamp} -> {ffmpeg_start_time}到{ffmpeg_end_time}")
+        logger.info(f"📹 [{i}/{total_clips}] 裁剪视频片段: {timestamp}")
+        logger.debug(f"   起始时间: {start_time} ({time_to_seconds(start_time):.3f}s)")
+        logger.debug(f"   预计时长: {duration:.3f}s")
+        logger.debug(f"   结束时间: {calculated_end_time} ({time_to_seconds(calculated_end_time):.3f}s)")
+        logger.info(f"   FFmpeg裁剪范围: {ffmpeg_start_time} 到 {ffmpeg_end_time}")
 
         success = execute_ffmpeg_with_fallback(
             ffmpeg_cmd, 
@@ -1048,6 +1273,19 @@ def clip_video(
 
     # 最终统计
     logger.info(f"📊 视频裁剪完成: 成功 {success_count}/{total_clips}, 失败 {len(failed_clips)}")
+
+    # 报告片段连续性检查结果
+    if continuity_errors:
+        logger.warning(f"⚠️  检测到 {len(continuity_errors)} 处时间间隙:")
+        for error in continuity_errors[:5]:  # 只显示前5个
+            logger.warning(
+                f"   片段{error['index']}-{error['index']+1}: "
+                f"{error['previous_end']} -> {error['current_start']} "
+                f"(间隔{error['gap']:.3f}秒)"
+            )
+        if len(continuity_errors) > 5:
+            logger.warning(f"   ... 还有 {len(continuity_errors) - 5} 处间隔")
+        logger.warning("💡 建议检查解说文案的时间戳是否连续")
     
     # 检查是否有失败的片段
     if failed_clips:

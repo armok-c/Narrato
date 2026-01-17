@@ -1547,8 +1547,8 @@ def tts_multiple(task_id: str, list_script: list, voice_name: str, voice_rate: f
             else:
                 # SoulVoice、Qwen3、IndexTTS2 引擎不生成字幕文件
                 if is_soulvoice_voice(voice_name) or is_qwen_engine(tts_engine) or tts_engine == "indextts2":
-                    # 获取实际音频文件的时长
-                    duration = get_audio_duration_from_file(audio_file)
+                    # 获取实际音频文件的时长（传入text以提供更准确的估算）
+                    duration = get_audio_duration_from_file(audio_file, text)
                     if duration <= 0:
                         # 如果无法获取文件时长，尝试从 SubMaker 获取
                         duration = get_audio_duration(sub_maker)
@@ -1574,36 +1574,127 @@ def tts_multiple(task_id: str, list_script: list, voice_name: str, voice_rate: f
     return tts_results
 
 
-def get_audio_duration_from_file(audio_file: str) -> float:
+def get_audio_duration_from_file(audio_file: str, text: str = None) -> float:
     """
     获取音频文件的时长（秒）
+
+    使用多种方法按优先级尝试：
+    1. ffprobe（最准确，推荐）
+    2. moviepy（如果可用）
+    3. 文件大小估算（最后 fallback）
+
+    Args:
+        audio_file: 音频文件路径
+        text: 音频对应的文本（用于估算时的参考）
+
+    Returns:
+        float: 音频时长（秒），如果无法获取则返回估算值
     """
+    # 检查文件是否存在
+    if not os.path.exists(audio_file):
+        logger.error(f"音频文件不存在: {audio_file}")
+        return 3.0  # 默认返回
+
+    # 方法 1: 使用 ffprobe 获取最准确的时长（推荐）
+    duration = _get_duration_with_ffprobe(audio_file)
+    if duration > 0:
+        logger.debug(f"使用 ffprobe 获取音频时长: {duration:.3f}秒")
+        return duration
+
+    # 方法 2: 使用 moviepy（如果可用）
     if MOVIEPY_AVAILABLE:
         try:
             audio_clip = AudioFileClip(audio_file)
             duration = audio_clip.duration
             audio_clip.close()
+            logger.debug(f"使用 moviepy 获取音频时长: {duration:.3f}秒")
             return duration
         except Exception as e:
             logger.error(f"使用 moviepy 获取音频时长失败: {str(e)}")
 
-    # Fallback: 使用更准确的估算方法
+    # 方法 3: 使用文件大小估算（最不准确的 fallback）
+    return _estimate_duration_by_file_size(audio_file, text)
+
+
+def _get_duration_with_ffprobe(audio_file: str) -> float:
+    """
+    使用 ffprobe 获取音频文件的精确时长
+
+    Args:
+        audio_file: 音频文件路径
+
+    Returns:
+        float: 音频时长（秒），失败返回 0
+    """
     try:
-        import os
+        import subprocess
+
+        # 使用 ffprobe 获取音频时长
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            audio_file
+        ]
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10
+        )
+
+        if result.returncode == 0 and result.stdout.strip():
+            duration = float(result.stdout.strip())
+            if duration > 0:
+                return duration
+
+    except FileNotFoundError:
+        logger.warning("ffprobe 未安装，将使用其他方法获取音频时长")
+    except subprocess.TimeoutExpired:
+        logger.warning("ffprobe 执行超时")
+    except ValueError:
+        logger.warning(f"无法解析 ffprobe 输出: {result.stdout}")
+    except Exception as e:
+        logger.error(f"使用 ffprobe 获取音频时长失败: {str(e)}")
+
+    return 0.0
+
+
+def _estimate_duration_by_file_size(audio_file: str, text: str = None) -> float:
+    """
+    根据文件大小和文本长度估算音频时长（不准确的 fallback）
+
+    Args:
+        audio_file: 音频文件路径
+        text: 音频对应的文本（用于更准确的估算）
+
+    Returns:
+        float: 估算的音频时长（秒）
+    """
+    try:
         file_size = os.path.getsize(audio_file)
 
-        # 更准确的 MP3 时长估算
-        # 假设 MP3 平均比特率为 128kbps = 16KB/s
-        # 但实际文件还包含头部信息，所以调整系数
-        estimated_duration = max(1.0, file_size / 20000)  # 调整为更保守的估算
+        # 如果有文本，优先使用文本长度估算（更准确）
+        if text and len(text) > 0:
+            # 中文语音平均速度约为 3-4 字/秒
+            # 根据标点符号调整（逗号、句号停顿）
+            pause_count = text.count('，') + text.count('。') + text.count('！') + text.count('？')
+            estimated_duration = max(1.0, (len(text) + pause_count * 0.5) / 3.5)
+            logger.warning(f"使用文本长度估算音频时长: {estimated_duration:.2f}秒 (文本长度: {len(text)} 字)")
+            return estimated_duration
 
-        # 对于中文语音，根据文本长度进行二次校正
-        # 一般中文语音速度约为 3-4 字/秒
-        logger.warning(f"使用文件大小估算音频时长: {estimated_duration:.2f}秒")
+        # 没有文本，使用文件大小估算（很不准确）
+        # 假设 MP3 平均比特率为 128kbps = 16KB/s
+        # 实际文件还包含头部信息，所以调整系数
+        estimated_duration = max(1.0, file_size / 20000)
+        logger.warning(f"使用文件大小估算音频时长: {estimated_duration:.2f}秒 (文件大小: {file_size} 字节)")
         return estimated_duration
+
     except Exception as e:
-        logger.error(f"获取音频时长失败: {str(e)}")
-        # 如果所有方法都失败，返回一个基于文本长度的估算
+        logger.error(f"估算音频时长失败: {str(e)}")
         return 3.0  # 默认3秒，避免返回0
 
 def parse_soulvoice_voice(voice_name: str) -> str:
