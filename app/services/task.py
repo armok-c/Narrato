@@ -511,6 +511,146 @@ def validate_params(video_path, audio_path, output_file, params):
         raise ValueError("视频参数不能为空")
 
 
+def start_overlay_narration(task_id: str, params: VideoClipParams):
+    """
+    叠加解说到完整原视频（不裁剪视频）
+
+    这是"真正意义上的逐帧解说"的新任务类型。
+
+    只在逐帧解说（AUTO_MODE）下使用。
+
+    Args:
+        task_id: 任务ID
+        params: 视频参数
+    """
+    logger.info(f"\n\n## 开始叠加解说任务: {task_id}")
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=0)
+
+    """
+    1. 加载剪辑脚本
+    """
+    logger.info("\n\n## 1. 加载视频脚本")
+    video_script_path = path.join(params.video_clip_json_path)
+
+    if path.exists(video_script_path):
+        with open(video_script_path, "r", encoding="utf-8") as f:
+            list_script = json.load(f)
+            video_list = [i['narration'] for i in list_script]
+            video_ost = [i['OST'] for i in list_script]
+            time_list = [i['timestamp'] for i in list_script]
+
+            logger.debug(f"解说完整脚本: \n{video_list}")
+            logger.debug(f"解说 OST 列表: \n{video_ost}")
+            logger.debug(f"解说时间戳列表: \n{time_list}")
+    else:
+        raise ValueError("解说脚本文件不存在！")
+
+    """
+    2. 使用 TTS 生成音频素材
+    """
+    logger.info("\n\n## 2. 生成配音音频")
+    # 只为OST=0 or 2的片段生成音频
+    tts_segments = [
+        segment for segment in list_script
+        if segment['OST'] in [0, 2]
+    ]
+    logger.debug(f"需要生成TTS的片段数: {len(tts_segments)}")
+
+    tts_results = voice.tts_multiple(
+        task_id=task_id,
+        list_script=tts_segments,
+        tts_engine=params.tts_engine,
+        voice_name=params.voice_name,
+        voice_rate=params.voice_rate,
+        voice_pitch=params.voice_pitch,
+    )
+
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
+
+    """
+    3. 合并字幕
+    """
+    logger.info("\n\n## 3. 合并字幕")
+    merged_subtitle_path = subtitle_merger.merge_subtitle_files(list_script)
+    if merged_subtitle_path:
+        logger.info(f"字幕文件合并成功-> {merged_subtitle_path}")
+    else:
+        logger.warning("没有有效的字幕内容，将生成无字幕视频")
+        merged_subtitle_path = ""
+
+    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+
+    """
+    4. 准备解说片段列表
+    """
+    logger.info("\n\n## 4. 准备解说片段")
+    narration_segments = []
+
+    for tts_result, script_item in zip(tts_results, tts_segments):
+        narration_segments.append({
+            'timestamp': script_item['timestamp'],
+            'audio_path': tts_result['audio_file'],
+            'subtitle_path': tts_result.get('subtitle_file', '')
+        })
+
+    logger.info(f"准备叠加 {len(narration_segments)} 个解说片段")
+
+    """
+    5. 叠加解说到完整原视频
+    """
+    logger.info("\n\n## 5. 叠加解说到完整原视频")
+
+    output_video_path = path.join(utils.task_dir(task_id), f"overlay_narration.mp4")
+
+    # 获取"静音原声"选项
+    mute_original_audio = st.session_state.get('mute_original_audio', True)
+    logger.info(f"静音原声设置: {'是' if mute_original_audio else '否'}")
+
+    # 获取BGM
+    bgm_path = utils.get_bgm_file()
+
+    # 获取音量配置
+    optimized_volumes = get_recommended_volumes_for_content('mixed')
+    final_tts_volume = params.tts_volume if hasattr(params, 'tts_volume') and params.tts_volume != 1.0 else optimized_volumes['tts_volume']
+    final_bgm_volume = params.bgm_volume if hasattr(params, 'bgm_volume') and params.bgm_volume != 0.3 else optimized_volumes['bgm_volume']
+
+    options = {
+        'voice_volume': final_tts_volume,
+        'bgm_volume': final_bgm_volume,
+        'original_audio_volume': 0.0 if mute_original_audio else 1.0,
+        'keep_original_audio': True,
+        'subtitle_enabled': params.subtitle_enabled,
+        'subtitle_font': params.font_name,
+        'subtitle_font_size': params.font_size,
+        'subtitle_color': params.text_fore_color,
+        'subtitle_bg_color': None,
+        'subtitle_position': params.subtitle_position,
+        'custom_position': params.custom_position,
+        'threads': params.n_threads
+    }
+
+    logger.info(f"音量配置 - TTS: {final_tts_volume}, BGM: {final_bgm_volume}, 原声: {options['original_audio_volume']}")
+
+    # 调用新的叠加配音函数
+    generate_video.merge_narration_to_full_video(
+        video_path=params.video_origin_path,
+        narration_segments=narration_segments,
+        output_path=output_video_path,
+        mute_original_audio=mute_original_audio,
+        bgm_path=bgm_path,
+        options=options
+    )
+
+    sm.state.update_task(task_id, state=const.TASK_STATE_COMPLETE, progress=100)
+
+    logger.success(f"叠加解说任务 {task_id} 已完成")
+
+    return {
+        "videos": [output_video_path],
+        "combined_videos": [output_video_path]
+    }
+
+
 if __name__ == "__main__":
     task_id = "demo"
 

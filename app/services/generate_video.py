@@ -404,6 +404,242 @@ def merge_materials(
     return output_path
 
 
+def parse_timestamp_range(timestamp: str) -> tuple[float, float]:
+    """
+    解析时间戳范围 "00:00:00,000-00:00:05,900"
+
+    Args:
+        timestamp: 时间戳字符串
+
+    Returns:
+        (start_time, end_time) 单位：秒
+    """
+    from app.utils import utils
+
+    parts = timestamp.split('-')
+    if len(parts) != 2:
+        raise ValueError(f"无效的时间戳格式: {timestamp}")
+
+    start_time_str = parts[0].strip().replace(',', '.')
+    end_time_str = parts[1].strip().replace(',', '.')
+
+    start_time = utils.time_to_seconds(start_time_str)
+    end_time = utils.time_to_seconds(end_time_str)
+
+    return start_time, end_time
+
+
+def merge_narration_to_full_video(
+    video_path: str,
+    narration_segments: list,
+    output_path: str,
+    mute_original_audio: bool = True,
+    bgm_path: Optional[str] = None,
+    options: Optional[Dict[str, Any]] = None
+) -> str:
+    """
+    将解说音频和字幕叠加到完整原视频上（不裁剪视频）
+
+    这是"真正意义上的逐帧解说"的核心函数。
+
+    Args:
+        video_path: 原视频文件路径（完整视频）
+        narration_segments: 解说片段列表，每个包含：
+            - timestamp: "00:00:00,000-00:00:05,900"
+            - audio_path: 配音音频文件路径
+            - subtitle_path: 字幕文件路径
+        output_path: 输出文件路径
+        mute_original_audio: 是否静音原声（在解说时段），默认True
+        bgm_path: 背景音乐文件路径
+        options: 其他选项配置
+
+    Returns:
+        输出视频的路径
+    """
+    # 合并选项默认值
+    if options is None:
+        options = {}
+
+    # 设置默认参数值
+    voice_volume = options.get('voice_volume', AudioVolumeDefaults.VOICE_VOLUME)
+    bgm_volume = options.get('bgm_volume', AudioVolumeDefaults.BGM_VOLUME)
+    original_audio_volume = options.get('original_audio_volume', 1.0 if not mute_original_audio else 0.0)
+    subtitle_font = options.get('subtitle_font', '')
+    subtitle_font_size = options.get('subtitle_font_size', 40)
+    subtitle_color = options.get('subtitle_color', '#FFFFFF')
+    subtitle_bg_color = options.get('subtitle_bg_color', None)
+    subtitle_position = options.get('subtitle_position', 'bottom')
+    custom_position = options.get('custom_position', 70)
+    stroke_color = options.get('stroke_color', '#000000')
+    stroke_width = options.get('stroke_width', 1)
+    threads = options.get('threads', 2)
+    subtitle_enabled = options.get('subtitle_enabled', True)
+
+    logger.info(f"开始叠加解说到完整原视频...")
+    logger.info(f"  ① 原视频: {video_path}")
+    logger.info(f"  ② 解说片段数: {len(narration_segments)}")
+    logger.info(f"  ③ 静音原声: {'是' if mute_original_audio else '否'}")
+    logger.info(f"  ④ 输出: {output_path}")
+
+    # 1. 加载完整原视频
+    try:
+        video_clip = VideoFileClip(video_path)
+        logger.info(f"原视频时长: {video_clip.duration}秒")
+
+        # 提取视频原声
+        original_audio = None
+        try:
+            original_audio = video_clip.audio
+            if original_audio:
+                logger.info(f"已提取视频原声，音量: {original_audio_volume}")
+            else:
+                logger.warning("视频没有音轨，无法提取原声")
+        except Exception as e:
+            logger.error(f"提取视频原声失败: {str(e)}")
+            original_audio = None
+
+        # 移除原始音轨，稍后会合并新的音频
+        video_clip = video_clip.without_audio()
+
+    except Exception as e:
+        logger.error(f"加载视频失败: {str(e)}")
+        raise
+
+    # 2. 创建配音音频片段（只在指定时间段）
+    # 关键修复：先添加原声（如果存在），确保视频时长基于原声
+    audio_tracks = []
+
+    # 2.1 添加原声作为基础轨道（确保视频时长基于原声）
+    if original_audio:
+        if original_audio_volume != 1.0:
+            original_audio = original_audio.with_effects([afx.MultiplyVolume(original_audio_volume)])
+        audio_tracks.append(original_audio)
+        logger.info(f"已添加视频原声（基础轨道），最终音量: {original_audio_volume}")
+
+    # 2.2 添加配音片段（只设置起始时间，不设置结束时间）
+    for i, segment in enumerate(narration_segments, 1):
+        timestamp = segment['timestamp']
+        audio_path = segment['audio_path']
+
+        try:
+            # 解析时间戳
+            start_time, end_time = parse_timestamp_range(timestamp)
+            duration = end_time - start_time
+
+            logger.info(f"处理片段 {i}/{len(narration_segments)}: {timestamp} ({duration:.2f}s)")
+
+            # 加载配音音频
+            voice_clip = AudioFileClip(audio_path)
+
+            # 调整配音音量
+            voice_clip = voice_clip.with_effects([afx.MultiplyVolume(voice_volume)])
+
+            # 关键修复：只设置起始时间，不设置结束时间
+            # 这样配音会在原声轨道上叠加播放
+            if mute_original_audio:
+                # 如果需要静音原声，不将原声添加到音频轨道
+                # 原声已在上面添加，这里需要特殊处理
+                pass
+            voiced_clip = voice_clip.set_start(start_time)
+            audio_tracks.append(voiced_clip)
+
+        except Exception as e:
+            logger.warning(f"处理片段 {i} 失败: {str(e)}")
+            continue
+
+    # 2.3 如果需要静音原声，移除原声轨道
+    if mute_original_audio and len(audio_tracks) > 1 and original_audio:
+        # 第一个轨道是原声，移除它
+        audio_tracks = audio_tracks[1:]
+        logger.info("已移除原声轨道（静音模式）")
+
+    # 4. 添加BGM
+    if bgm_path and os.path.exists(bgm_path):
+        bgm_clip = AudioFileClip(bgm_path)
+        bgm_clip = bgm_clip.with_effects([afx.MultiplyVolume(bgm_volume)])
+        bgm_clip = bgm_clip.with_effects([afx.AudioLoop(duration=video_clip.duration)])
+        audio_tracks.append(bgm_clip)
+        logger.info(f"已添加背景音乐，音量: {bgm_volume}")
+
+    # 5. 合成最终音频
+    if audio_tracks:
+        # 验证视频时长在处理音频前
+        logger.info(f"合成音频前视频时长: {video_clip.duration}秒")
+
+        final_audio = CompositeAudioClip(audio_tracks)
+        video_clip = video_clip.without_audio()
+        video_clip = video_clip.with_audio(final_audio)
+
+        # 验证视频时长在处理音频后
+        logger.info(f"合成音频后视频时长: {video_clip.duration}秒")
+
+        logger.info("音频合成完成")
+    else:
+        logger.warning("没有音频轨道，视频将无声音")
+
+    # 6. 叠加字幕（只在解说时段）
+    if subtitle_enabled and narration_segments:
+        logger.info("开始叠加字幕...")
+
+        # 处理透明背景色问题 - MoviePy 2.1.1不支持'transparent'值
+        if subtitle_bg_color == 'transparent':
+            subtitle_bg_color = None  # None在新版MoviePy中表示透明背景
+
+        for i, segment in enumerate(narration_segments, 1):
+            subtitle_path = segment.get('subtitle_path')
+            if subtitle_path and os.path.exists(subtitle_path):
+                try:
+                    # 解析时间戳
+                    start_time, end_time = parse_timestamp_range(segment['timestamp'])
+
+                    logger.info(f"添加字幕 {i}: {segment['timestamp']}")
+
+                    # 创建字幕剪辑
+                    subtitles = SubtitlesClip(subtitle_path, fontsize=subtitle_font_size)
+                    subtitles = subtitles.subclip(start_time, end_time)
+
+                    # 叠加字幕到视频
+                    video_clip = CompositeVideoClip([video_clip, subtitles])
+
+                except Exception as e:
+                    logger.warning(f"添加字幕 {i} 失败: {str(e)}")
+
+    # 7. 输出视频
+    logger.info(f"开始输出视频: {output_path}")
+    logger.info(f"输出前视频时长: {video_clip.duration}秒")
+
+    # 创建输出目录
+    output_dir = os.path.dirname(output_path)
+    os.makedirs(output_dir, exist_ok=True)
+
+    video_clip.write_videofile(
+        output_path,
+        codec='libx264',
+        audio_codec='aac',
+        threads=threads,
+        logger=None
+    )
+
+    # 验证输出视频时长
+    try:
+        output_video = VideoFileClip(output_path)
+        logger.info(f"✅ 输出视频时长: {output_video.duration}秒")
+        logger.success(f"视频生成成功: {output_path}")
+        output_video.close()
+
+        # 验证时长是否正确
+        duration_diff = abs(output_video.duration - video_clip.duration)
+        if duration_diff > 0.1:
+            logger.warning(f"⚠️ 视频时长异常！处理前{video_clip.duration:.2f}s，处理后{output_video.duration:.2f}s，差异{duration_diff:.2f}s")
+        else:
+            logger.success(f"✅ 视频时长验证通过（{output_video.duration:.2f}s）")
+    except Exception as e:
+        logger.error(f"验证输出视频失败: {str(e)}")
+
+    return output_path
+
+
+ 
 def wrap_text(text, max_width, font="Arial", fontsize=60):
     """
     文本换行函数，使长文本适应指定宽度

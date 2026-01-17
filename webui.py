@@ -174,10 +174,32 @@ def render_generate_button():
 
         def run_task():
             try:
-                tm.start_subclip_unified(
-                    task_id=task_id,
-                    params=params
-                )
+                # 检查是否是逐帧解说 + 叠加配音模式
+                script_type = st.session_state.get('video_clip_json_path', '')
+                script_generation_mode = st.session_state.get('script_generation_mode', '')
+                overlay_mode = st.session_state.get('overlay_mode', False)
+                mute_original_audio = st.session_state.get('mute_original_audio', True)
+
+                # 检查是否是逐帧解说模式（包括从auto模式保存的脚本）
+                is_auto_mode = (script_type == "auto" or script_generation_mode == "auto")
+
+                logger.info(f"模式检查: script_type='{script_type}', script_generation_mode='{script_generation_mode}', is_auto_mode={is_auto_mode}")
+                logger.info(f"叠加配音模式: overlay_mode={overlay_mode}, mute_original_audio={mute_original_audio}")
+
+                if is_auto_mode and overlay_mode:
+                    # 使用新的叠加配音任务
+                    logger.info("✅ 使用叠加配音模式")
+                    tm.start_overlay_narration(
+                        task_id=task_id,
+                        params=params
+                    )
+                else:
+                    # 使用原有的裁剪+合并任务
+                    logger.info("使用原有裁剪模式")
+                    tm.start_subclip_unified(
+                        task_id=task_id,
+                        params=params
+                    )
             except Exception as e:
                 logger.error(f"任务执行失败: {e}")
                 sm.state.update_task(task_id, state=const.TASK_STATE_FAILED, message=str(e))

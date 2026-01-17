@@ -52,11 +52,36 @@ def render_video_config(tr, params):
     )
     st.session_state['original_volume'] = params.original_volume
 
+    # 新增：叠加配音模式（对所有脚本类型都显示）
+    # 关键修复：从 session_state 获取之前的值，避免每次重置
+    overlay_mode = st.checkbox(
+        tr("叠加配音模式（保留完整原视频）"),
+        value=st.session_state.get('overlay_mode', False),  # 使用已保存的值
+        help="在原视频上叠加配音和字幕，不裁剪视频"
+    )
+    st.session_state['overlay_mode'] = overlay_mode
+
+    # 新增：静音原声（仅在叠加模式下显示）
+    if overlay_mode:
+        mute_original_audio = st.checkbox(
+            tr("静音原声（在解说时段）"),
+            value=st.session_state.get('mute_original_audio', True),  # 使用已保存的值
+            help="在解说时段静音原声，保持配音清晰"
+        )
+        st.session_state['mute_original_audio'] = mute_original_audio
+    else:
+        # 如果取消叠加模式，重置静音选项
+        if 'mute_original_audio' in st.session_state:
+            del st.session_state['mute_original_audio']
+
+
 
 def get_video_params():
     """获取视频参数"""
     return {
         'video_aspect': st.session_state.get('video_aspect', VideoAspect.portrait.value),
         'video_quality': st.session_state.get('video_quality', '1080p'),
-        'original_volume': st.session_state.get('original_volume', AudioVolumeDefaults.ORIGINAL_VOLUME)
+        'original_volume': st.session_state.get('original_volume', AudioVolumeDefaults.ORIGINAL_VOLUME),
+        'overlay_mode': st.session_state.get('overlay_mode', False),  # 新增
+        'mute_original_audio': st.session_state.get('mute_original_audio', True)  # 新增
     }

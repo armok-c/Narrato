@@ -407,7 +407,7 @@ def render_script_buttons(tr, params):
     script_path = st.session_state.get('video_clip_json_path', '')
 
     # 生成/加载按钮
-    if script_path == "auto":
+    if script_path == "auto" or st.session_state.get('script_generation_mode', '') == "auto":
         button_name = tr("Generate Video Script")
     elif script_path == "short":
         button_name = tr("Generate Short Video Script")
@@ -418,7 +418,11 @@ def render_script_buttons(tr, params):
     else:
         button_name = tr("Please Select Script File")
 
+    # 生成/加载按钮
     if st.button(button_name, key="script_action", disabled=not script_path):
+        # 在任何脚本生成模式下都保存生成模式（包括auto）
+        st.session_state['script_generation_mode'] = script_path if script_path in ["auto", "short", "summary"] else "file"
+
         if script_path == "auto":
             # 执行纪录片视频脚本生成（视频无字幕无配音）
             generate_script_docu(params)
