@@ -183,6 +183,12 @@ def render_generate_button():
                 # 检查是否是逐帧解说模式（包括从auto模式保存的脚本）
                 is_auto_mode = (script_type == "auto" or script_generation_mode == "auto")
 
+                # 强制逻辑：逐帧解说模式必须启用叠加配音
+                if is_auto_mode:
+                    overlay_mode = True
+                    st.session_state['overlay_mode'] = True
+                    logger.info("逐帧解说模式已强制启用叠加配音功能")
+
                 logger.info(f"模式检查: script_type='{script_type}', script_generation_mode='{script_generation_mode}', is_auto_mode={is_auto_mode}")
                 logger.info(f"叠加配音模式: overlay_mode={overlay_mode}, mute_original_audio={mute_original_audio}")
 

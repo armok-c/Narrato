@@ -53,13 +53,28 @@ def render_video_config(tr, params):
     st.session_state['original_volume'] = params.original_volume
 
     # 新增：叠加配音模式（对所有脚本类型都显示）
-    # 关键修复：从 session_state 获取之前的值，避免每次重置
-    overlay_mode = st.checkbox(
-        tr("叠加配音模式（保留完整原视频）"),
-        value=st.session_state.get('overlay_mode', False),  # 使用已保存的值
-        help="在原视频上叠加配音和字幕，不裁剪视频"
-    )
-    st.session_state['overlay_mode'] = overlay_mode
+    # 强制逻辑：逐帧解说模式（script_generation_mode == "auto"）强制启用叠加配音
+    script_generation_mode = st.session_state.get('script_generation_mode', '')
+    is_auto_mode = (script_generation_mode == "auto")
+
+    # 如果是逐帧解说模式，强制启用叠加配音，并且禁用取消选项
+    if is_auto_mode:
+        overlay_mode = True
+        st.session_state['overlay_mode'] = True
+        st.checkbox(
+            tr("叠加配音模式（保留完整原视频）"),
+            value=True,
+            disabled=True,
+            help="逐帧解说模式已自动启用叠加配音功能（不可禁用）"
+        )
+    else:
+        # 非逐帧解说模式，允许用户手动选择
+        overlay_mode = st.checkbox(
+            tr("叠加配音模式（保留完整原视频）"),
+            value=st.session_state.get('overlay_mode', False),  # 使用已保存的值
+            help="在原视频上叠加配音和字幕，不裁剪视频"
+        )
+        st.session_state['overlay_mode'] = overlay_mode
 
     # 新增：静音原声（仅在叠加模式下显示）
     if overlay_mode:
