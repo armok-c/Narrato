@@ -511,10 +511,66 @@ def merge_narration_to_full_video(
 
     # 2.1 添加原声作为基础轨道（确保视频时长基于原声）
     if original_audio:
-        if original_audio_volume != 1.0:
+        # 如果需要按解说时段静音原声，使用分段拼接方式实现局部静音
+        if mute_original_audio and narration_segments:
+            logger.info("使用局部静音模式：在解说时段静音原声")
+            # 解析所有解说时段并按时间排序
+            mute_periods = []
+            for segment in narration_segments:
+                try:
+                    start_time, end_time = parse_timestamp_range(segment['timestamp'])
+                    mute_periods.append((start_time, end_time))
+                except Exception as e:
+                    logger.warning(f"解析静音时段失败: {str(e)}")
+                    continue
+
+            # 按开始时间排序
+            mute_periods.sort(key=lambda x: x[0])
+            logger.info(f"需要静音的时段数: {len(mute_periods)}")
+
+            # 使用分段拼接方式构建原声（在解说时段插入静音片段）
+            audio_segments = []
+            last_end = 0.0
+
+            for mute_start, mute_end in mute_periods:
+                # 添加静音时段之前的部分（保留原声）
+                if mute_start > last_end:
+                    segment = original_audio.subclip(last_end, mute_start)
+                    audio_segments.append(segment)
+                    logger.debug(f"保留原声时段: {last_end:.2f}s - {mute_start:.2f}s")
+
+                # 添加静音时段（音量为0）
+                silent_duration = mute_end - mute_start
+                silent_segment = original_audio.subclip(mute_start, mute_end).with_effects([afx.MultiplyVolume(0.0)])
+                audio_segments.append(silent_segment)
+                logger.debug(f"静音时段: {mute_start:.2f}s - {mute_end:.2f}s (时长{silent_duration:.2f}s)")
+
+                last_end = mute_end
+
+            # 添加最后一个静音时段之后的部分（保留原声）
+            if last_end < original_audio.duration:
+                segment = original_audio.subclip(last_end, original_audio.duration)
+                audio_segments.append(segment)
+                logger.debug(f"保留原声时段: {last_end:.2f}s - {original_audio.duration:.2f}s")
+
+            # 将所有片段拼接起来
+            if len(audio_segments) > 1:
+                from moviepy import concatenate_audioclips
+                original_audio = concatenate_audioclips(audio_segments)
+                logger.info(f"原声已重新拼接（{len(audio_segments)}个片段）")
+            elif len(audio_segments) == 1:
+                original_audio = audio_segments[0]
+                logger.info("原声无需分段拼接")
+            else:
+                logger.warning("没有音频片段，原声为空")
+
+        # 应用整体音量
+        if original_audio and original_audio_volume != 1.0:
             original_audio = original_audio.with_effects([afx.MultiplyVolume(original_audio_volume)])
-        audio_tracks.append(original_audio)
-        logger.info(f"已添加视频原声（基础轨道），最终音量: {original_audio_volume}")
+
+        if original_audio:
+            audio_tracks.append(original_audio)
+            logger.info(f"已添加视频原声（基础轨道），最终音量: {original_audio_volume}")
 
     # 2.2 添加配音片段（只设置起始时间，不设置结束时间）
     for i, segment in enumerate(narration_segments, 1):
@@ -534,24 +590,13 @@ def merge_narration_to_full_video(
             # 调整配音音量
             voice_clip = voice_clip.with_effects([afx.MultiplyVolume(voice_volume)])
 
-            # 关键修复：只设置起始时间，不设置结束时间
-            # 这样配音会在原声轨道上叠加播放
-            if mute_original_audio:
-                # 如果需要静音原声，不将原声添加到音频轨道
-                # 原声已在上面添加，这里需要特殊处理
-                pass
+            # 叠加配音到音频轨道
             voiced_clip = voice_clip.set_start(start_time)
             audio_tracks.append(voiced_clip)
 
         except Exception as e:
             logger.warning(f"处理片段 {i} 失败: {str(e)}")
             continue
-
-    # 2.3 如果需要静音原声，移除原声轨道
-    if mute_original_audio and len(audio_tracks) > 1 and original_audio:
-        # 第一个轨道是原声，移除它
-        audio_tracks = audio_tracks[1:]
-        logger.info("已移除原声轨道（静音模式）")
 
     # 4. 添加BGM
     if bgm_path and os.path.exists(bgm_path):

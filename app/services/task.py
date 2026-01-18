@@ -5,6 +5,7 @@ import re
 import traceback
 from os import path
 from loguru import logger
+import streamlit as st
 
 from app.config import config
 from app.config.audio_config import AudioConfig, get_recommended_volumes_for_content
@@ -524,6 +525,16 @@ def start_overlay_narration(task_id: str, params: VideoClipParams):
         params: 视频参数
     """
     logger.info(f"\n\n## 开始叠加解说任务: {task_id}")
+
+    # 验证：确保这是逐帧解说模式（overlay_mode 应该已被启用）
+    overlay_mode = st.session_state.get('overlay_mode', False)
+    if not overlay_mode:
+        logger.warning(f"⚠️ 警告：叠加配音任务被调用但 overlay_mode={overlay_mode}，强制启用")
+        overlay_mode = True
+        st.session_state['overlay_mode'] = True
+    else:
+        logger.info(f"✅ 叠加配音模式已正确启用 (overlay_mode={overlay_mode})")
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=0)
 
     """
@@ -617,7 +628,7 @@ def start_overlay_narration(task_id: str, params: VideoClipParams):
     options = {
         'voice_volume': final_tts_volume,
         'bgm_volume': final_bgm_volume,
-        'original_audio_volume': 0.0 if mute_original_audio else 1.0,
+        'original_audio_volume': 0.0 if mute_original_audio else 1.0,  # 叠加模式下静音原声时为0.0
         'keep_original_audio': True,
         'subtitle_enabled': params.subtitle_enabled,
         'subtitle_font': params.font_name,
@@ -629,7 +640,7 @@ def start_overlay_narration(task_id: str, params: VideoClipParams):
         'threads': params.n_threads
     }
 
-    logger.info(f"音量配置 - TTS: {final_tts_volume}, BGM: {final_bgm_volume}, 原声: {options['original_audio_volume']}")
+    logger.info(f"音量配置 - TTS: {final_tts_volume}, BGM: {final_bgm_volume}, 原声: {options['original_audio_volume']}, 叠加模式(overlay_mode): True")
 
     # 调用新的叠加配音函数
     generate_video.merge_narration_to_full_video(

@@ -201,7 +201,10 @@ def render_generate_button():
 
                 if is_auto_mode and overlay_mode:
                     # 使用新的叠加配音任务
-                    logger.info("✅ 使用叠加配音模式")
+                    logger.info("✅ 使用叠加配音模式（逐帧解说）")
+                    # 验证：确保 overlay_mode 被正确设置
+                    assert overlay_mode == True, "逐帧解说模式下 overlay_mode 必须为 True"
+                    assert st.session_state.get('overlay_mode') == True, "session_state 中 overlay_mode 必须为 True"
                     tm.start_overlay_narration(
                         task_id=task_id,
                         params=params

@@ -197,6 +197,10 @@ class VideoClipParams(BaseModel):
     original_volume: Optional[float] = Field(default=AudioVolumeDefaults.ORIGINAL_VOLUME, description="视频原声音量")
     bgm_volume: Optional[float] = Field(default=AudioVolumeDefaults.BGM_VOLUME, description="背景音乐音量")
 
+    # 叠加配音模式相关参数
+    overlay_mode: bool = Field(default=False, description="叠加配音模式（保留完整原视频，只叠加配音和字幕）")
+    mute_original_audio: bool = Field(default=True, description="是否静音原声（在解说时段）")
+
 
 
 
