@@ -107,17 +107,39 @@ def get_video_params():
 
 
 def is_auto_script_from_ost():
-    """检查当前脚本是否为逐帧解说模式（通过OST字段判断）"""
+    """
+    检查当前脚本是否为逐帧解说模式（通过OST字段判断）
+
+    支持两种数据源：
+    1. st.session_state['video_clip_json']：内存中的脚本数据
+    2. st.session_state['video_clip_json'] 为空时，从 video_clip_json_path 文件读取
+    """
+    # 尝试从 session_state 获取
     video_clip_json = st.session_state.get('video_clip_json', [])
+
+    # 如果内存中没有，尝试从文件路径读取
+    if not video_clip_json or len(video_clip_json) == 0:
+        video_clip_json_path = st.session_state.get('video_clip_json_path', '')
+        if isinstance(video_clip_json_path, str) and video_clip_json_path:
+            try:
+                import json
+                import os
+                if os.path.exists(video_clip_json_path):
+                    with open(video_clip_json_path, 'r', encoding='utf-8') as f:
+                        video_clip_json = json.load(f)
+                        logger.info(f"从文件加载脚本数据: {video_clip_json_path}, 片段数: {len(video_clip_json)}")
+            except Exception as e:
+                logger.warning(f"从文件加载脚本失败: {str(e)}")
+
     if not video_clip_json or len(video_clip_json) == 0:
         return False
-    
+
     # 检查所有片段的OST值：如果所有片段的OST都等于2，则是逐帧解说模式
     all_ost_values = [segment.get('OST', 0) for segment in video_clip_json]
     # OST=2 表示保留原声和配音（逐帧解说模式生成的脚本）
     if all_ost_values and all(ost == 2 for ost in all_ost_values):
         logger.info(f"检测到逐帧解说脚本：所有{len(video_clip_json)}个片段的OST值均为2")
         return True
-    
+
     logger.debug(f"脚本OST值检查：OST值={[segment.get('OST', 0) for segment in video_clip_json]}")
     return False

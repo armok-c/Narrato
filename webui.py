@@ -175,29 +175,28 @@ def render_generate_button():
         def run_task():
             try:
                 # 检查是否是逐帧解说 + 叠加配音模式
-                script_type = st.session_state.get('video_clip_json_path', '')
                 script_generation_mode = st.session_state.get('script_generation_mode', '')
                 overlay_mode = st.session_state.get('overlay_mode', False)
                 mute_original_audio = st.session_state.get('mute_original_audio', True)
 
-                # 检查是否是逐帧解说模式（包括从auto模式保存的脚本）
-                is_auto_from_session = (script_type == "auto" or script_generation_mode == "auto")
-                # 新增：从video_settings导入OST检测函数
+                # 从 video_settings 导入 OST 检测函数
                 from webui.components.video_settings import is_auto_script_from_ost
                 is_auto_from_ost = is_auto_script_from_ost()
+
+                # 检查是否是逐帧解说模式（包括从 auto 模式保存的脚本）
+                is_auto_from_session = (script_generation_mode == "auto")
                 is_auto_mode = is_auto_from_session or is_auto_from_ost  # 两种方式都支持
 
-                logger.info(f"模式检查: script_type='{script_type}', script_generation_mode='{script_generation_mode}', is_auto_from_ost={is_auto_from_ost}, is_auto_mode={is_auto_mode}")
+                logger.info(f"模式检查: script_generation_mode='{script_generation_mode}', is_auto_from_ost={is_auto_from_ost}, is_auto_mode={is_auto_mode}")
                 logger.info(f"叠加配音模式: overlay_mode={overlay_mode}, mute_original_audio={mute_original_audio}")
 
                 # 强制逻辑：逐帧解说模式必须启用叠加配音
                 if is_auto_mode:
                     overlay_mode = True
                     st.session_state['overlay_mode'] = True
-                    logger.info("逐帧解说模式已强制启用叠加配音功能")
+                    logger.info("✅ 逐帧解说模式已强制启用叠加配音功能")
 
-                logger.info(f"模式检查: script_type='{script_type}', script_generation_mode='{script_generation_mode}', is_auto_mode={is_auto_mode}")
-                logger.info(f"叠加配音模式: overlay_mode={overlay_mode}, mute_original_audio={mute_original_audio}")
+                logger.info(f"模式检查（最终）: is_auto_mode={is_auto_mode}, overlay_mode={overlay_mode}")
 
                 if is_auto_mode and overlay_mode:
                     # 使用新的叠加配音任务
@@ -211,7 +210,7 @@ def render_generate_button():
                     )
                 else:
                     # 使用原有的裁剪+合并任务
-                    logger.info("使用原有裁剪模式")
+                    logger.info("使用原有裁剪模式（非逐帧解说）")
                     tm.start_subclip_unified(
                         task_id=task_id,
                         params=params
