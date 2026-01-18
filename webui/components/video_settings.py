@@ -1,4 +1,5 @@
 import streamlit as st
+from loguru import logger
 from app.models.schema import VideoClipParams, VideoAspect, AudioVolumeDefaults
 
 
@@ -53,9 +54,12 @@ def render_video_config(tr, params):
     st.session_state['original_volume'] = params.original_volume
 
     # 新增：叠加配音模式（对所有脚本类型都显示）
-    # 强制逻辑：逐帧解说模式（script_generation_mode == "auto"）强制启用叠加配音
+    # 强制逻辑：逐帧解说模式强制启用叠加配音
+    # 检测方式：通过session_state的script_generation_mode或通过脚本的OST值判断
     script_generation_mode = st.session_state.get('script_generation_mode', '')
-    is_auto_mode = (script_generation_mode == "auto")
+    is_auto_from_session = (script_generation_mode == "auto")
+    is_auto_from_ost = is_auto_script_from_ost()  # 新增：通过OST值检测逐帧解说脚本
+    is_auto_mode = is_auto_from_session or is_auto_from_ost  # 两种方式都支持
 
     # 如果是逐帧解说模式，强制启用叠加配音，并且禁用取消选项
     if is_auto_mode:
@@ -100,3 +104,20 @@ def get_video_params():
         'overlay_mode': st.session_state.get('overlay_mode', False),  # 新增
         'mute_original_audio': st.session_state.get('mute_original_audio', True)  # 新增
     }
+
+
+def is_auto_script_from_ost():
+    """检查当前脚本是否为逐帧解说模式（通过OST字段判断）"""
+    video_clip_json = st.session_state.get('video_clip_json', [])
+    if not video_clip_json or len(video_clip_json) == 0:
+        return False
+    
+    # 检查所有片段的OST值：如果所有片段的OST都等于2，则是逐帧解说模式
+    all_ost_values = [segment.get('OST', 0) for segment in video_clip_json]
+    # OST=2 表示保留原声和配音（逐帧解说模式生成的脚本）
+    if all_ost_values and all(ost == 2 for ost in all_ost_values):
+        logger.info(f"检测到逐帧解说脚本：所有{len(video_clip_json)}个片段的OST值均为2")
+        return True
+    
+    logger.debug(f"脚本OST值检查：OST值={[segment.get('OST', 0) for segment in video_clip_json]}")
+    return False
